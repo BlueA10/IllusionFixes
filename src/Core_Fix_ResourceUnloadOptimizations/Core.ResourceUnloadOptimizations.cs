@@ -94,27 +94,50 @@ namespace IllusionFixes
             GC.Collect(GC.MaxGeneration);
         }
 
+        private static bool IsCommitChargeUsageSafe(MemoryInfo.MEMORYSTATUSEX mem)
+        {
+            // Keep below 90% commit limit at all times; Windows expands the page file at 90% usage
+            var usage = (mem.ullTotalPageFile - mem.ullAvailPageFile) / (float)mem.ullTotalPageFile;
+            var usageLimit = .85f; // Keep a little below 90% just to be safe
+
+            return usage < usageLimit;
+        }
+
+        private static bool IsLoading()
+        {
+            return GetStudioLoadedNewScene() || GetIsNowLoadingFade();
+        }
+
+        private static void CleanUpCrashedSceneLoad()
+        {
+            _sceneLoadOperationsInProgress = 0;
+            return;
+        }
+
         private static bool PlentyOfMemory()
         {
-            if (!OptimizeMemoryUsage.Value) return false;
-
-            var mem = MemoryInfo.GetCurrentStatus();
-            if (mem == null) return false;
-
-            // Clean up more aggresively during loading, less aggresively during gameplay
-            var isLoading = GetStudioLoadedNewScene() || GetIsNowLoadingFade();
-            var pageFileFree = mem.ullAvailPageFile / (float)mem.ullTotalPageFile;
-            var plentyOfMemory = mem.dwMemoryLoad < (isLoading ? PercentMemoryThresholdDuringLoad.Value : PercentMemoryThreshold.Value) // physical memory free %
-                                 && pageFileFree > 0.3f // page file free %
-                                 && mem.ullAvailPageFile > 2ul * 1024ul * 1024ul * 1024ul; // at least 2GB of page file free
-            if (!plentyOfMemory)
+            MemoryInfo.MEMORYSTATUSEX mem;
+            if (!OptimizeMemoryUsage.Value || (mem = MemoryInfo.GetCurrentStatus()) is null)
             {
-                // in case a previous scene load crashed leaving count incorrect, clean it up
-                _sceneLoadOperationsInProgress = 0;
+                return false;
+            }
+            if (!IsCommitChargeUsageSafe(mem))
+            {
                 return false;
             }
 
-            Utilities.Logger.LogDebug($"Skipping cleanup because of low memory load ({mem.dwMemoryLoad}% RAM, {100 - (int)(pageFileFree * 100)}% Page file, {mem.ullAvailPageFile / 1024 / 1024}MB available in PF)");
+            // Clean up more aggresively during loading, less aggresively during gameplay
+            bool memIsPlenty = mem.dwMemoryLoad 
+                    < (IsLoading() ? PercentMemoryThresholdDuringLoad.Value : PercentMemoryThreshold.Value);
+
+            if (!memIsPlenty)
+            {
+                // in case a previous scene load crashed leaving count incorrect, clean it up
+                CleanUpCrashedSceneLoad();
+                return false;
+            }
+
+            Utilities.Logger.LogDebug($"Skipping cleanup because of low memory load: ({mem.dwMemoryLoad}% RAM.)");
             return true;
         }
 
