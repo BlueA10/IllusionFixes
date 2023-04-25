@@ -1,10 +1,10 @@
-﻿using BepInEx.Configuration;
+﻿using BepInEx;
+using BepInEx.Configuration;
 using Common;
 using HarmonyLib;
 using MonoMod.RuntimeDetour;
 using System;
 using System.Collections;
-using BepInEx;
 using UnityEngine;
 
 namespace IllusionFixes
@@ -26,19 +26,48 @@ namespace IllusionFixes
 
         public static ConfigEntry<bool> DisableUnload { get; private set; }
         public static ConfigEntry<bool> OptimizeMemoryUsage { get; private set; }
-        public static ConfigEntry<int> PercentMemoryThreshold { get; private set; }
-        public static ConfigEntry<int> PercentMemoryThresholdDuringLoad { get; private set; }
+        // public static ConfigEntry<bool> LimitBySystemCommit { get; private set; }
+        // public static ConfigEntry<int> PercentMemoryThreshold { get; private set; }
+        // public static ConfigEntry<int> PercentMemoryThresholdDuringLoad { get; private set; }
 
         internal void Awake()
         {
-            DisableUnload = Config.Bind(Utilities.ConfigSectionTweaks, "Disable Resource Unload", false, new ConfigDescription("Disables all resource unloading. Requires large amounts of RAM or will likely crash your game.", null, new ConfigurationManagerAttributes { IsAdvanced = true }));
-            OptimizeMemoryUsage = Config.Bind(Utilities.ConfigSectionTweaks, "Optimize Memory Usage", true, new ConfigDescription("Use more memory (if available) in order to load the game faster and reduce random stutter."));
-            PercentMemoryThreshold = Config.Bind(Utilities.ConfigSectionTweaks, "Optimize Memory Threshold", 75, new ConfigDescription("Minimum amount of memory to be used before resource unloading will run.", null, new ConfigurationManagerAttributes {IsAdvanced = true}));
+            OptimizeMemoryUsage = Config.Bind(Utilities.ConfigSectionTweaks, "Optimize Memory Usage", true, new ConfigDescription(
+                "Use more memory (if available) in order to load the game faster and reduce random stutter."));
+
+            /*
+            LimitBySystemCommit = Config.Bind(Utilities.ConfigSectionTweaks, "Optimize At High Commit Charge", true, new ConfigDescription(
+                "Regardless of the configured thresholds here, trigger unloading if system commit charge approaches 90% of the commit limit.\n" +
+                "\n" +
+                "On Windows systems with system managed page files, the page file will increase in size automatically when the system commit charge reaches 90% of the commit limit (RAM + total size of all page files.\n" +
+                "This setting is for trying to prevent growing the page file, but can be disabled to allow more memory usage.",
+                null, new ConfigurationManagerAttributes { IsAdvanced = true }));
+            */
+
+            DisableUnload = Config.Bind(Utilities.ConfigSectionTweaks, "Disable Resource Unload", false, new ConfigDescription(
+                "Disables all resource unloading. Requires large amounts of RAM or will likely crash your game.",
+                null, new ConfigurationManagerAttributes { IsAdvanced = true }));
+
+            /*
+            PercentMemoryThreshold = Config.Bind(Utilities.ConfigSectionTweaks, "Optimize Memory Threshold", 75, new ConfigDescription(
+                "Minimum percentage of physical memory to be used before resource unloading will run.",
+                null, new ConfigurationManagerAttributes { IsAdvanced = true }));
+            */
+
 #if !SBPR
-            PercentMemoryThresholdDuringLoad = Config.Bind(Utilities.ConfigSectionTweaks, "Optimize Memory Threshold During Load", 65, new ConfigDescription($"Minimum amount of memory to be used during load before resource unloading will run (should be lower than 'Optimize Memory Threshold').", null, new ConfigurationManagerAttributes {IsAdvanced = true}));
+            /*
+            PercentMemoryThresholdDuringLoad = Config.Bind(Utilities.ConfigSectionTweaks, "Optimize Memory Threshold During Load", 65, new ConfigDescription(
+                "Minimum percentage of physical memory to be used during load before resource unloading will run (should be lower than 'Optimize Memory Threshold').",
+                null, new ConfigurationManagerAttributes { IsAdvanced = true }));
+            */
 #else
-            PercentMemoryThresholdDuringLoad = Config.Bind(Utilities.ConfigSectionTweaks, "Optimize Memory Threshold During Load", 80, new ConfigDescription($"Minimum amount of memory to be used during load before resource unloading will run (should be higher than 'Optimize Memory Threshold').", null, new ConfigurationManagerAttributes { IsAdvanced = true }));
+            /*
+            PercentMemoryThresholdDuringLoad = Config.Bind(Utilities.ConfigSectionTweaks, "Optimize Memory Threshold During Load", 80, new ConfigDescription(
+                "Minimum amount of memory to be used during load before resource unloading will run (should be higher than 'Optimize Memory Threshold').",
+                null, new ConfigurationManagerAttributes { IsAdvanced = true }));
+            */
 #endif
+
             StartCoroutine(CleanupCo());
 
             InstallHooks();
@@ -77,7 +106,7 @@ namespace IllusionFixes
         private static AsyncOperation RunUnloadAssets()
         {
             // Only allow a single unload operation to run at one time
-            if (_currentOperation == null || _currentOperation.isDone && !PlentyOfMemory())
+            if (_currentOperation == null || _currentOperation.isDone && MemoryUsageIsHigh())
             {
                 Utilities.Logger.LogDebug("Starting unused asset cleanup");
                 _currentOperation = _originalUnload();
@@ -87,58 +116,54 @@ namespace IllusionFixes
 
         private static void RunGarbageCollect()
         {
-            if (PlentyOfMemory()) return;
-
-            Utilities.Logger.LogDebug("Starting full garbage collection");
-            // Use different overload since we disable the parameterless one
-            GC.Collect(GC.MaxGeneration);
+            if (MemoryUsageIsHigh())
+            {
+                Utilities.Logger.LogDebug("Starting full garbage collection");
+                // Use different overload since we disable the parameterless one
+                GC.Collect(GC.MaxGeneration);
+            }
         }
 
-        private static bool IsCommitChargeUsageSafe(MemoryInfo.MEMORYSTATUSEX mem)
+        private static bool CommitChargeIsHigh(MemoryInfo.MEMORYSTATUSEX mem)
         {
             // Keep below 90% commit limit at all times; Windows expands the page file at 90% usage
-            var usage = (mem.ullTotalPageFile - mem.ullAvailPageFile) / (float)mem.ullTotalPageFile;
-            var usageLimit = .85f; // Keep a little below 90% just to be safe
+            var usage = (mem.ullTotalPageFile - mem.ullAvailPageFile) / (double)mem.ullTotalPageFile;
+            var limit = GameIsLoading() ? .75 : .85; // Keep a little below 90% just to be safe
 
-            return usage < usageLimit;
+            return usage > limit;
         }
 
-        private static bool IsLoading()
+        private static bool GameIsLoading()
         {
             return GetStudioLoadedNewScene() || GetIsNowLoadingFade();
         }
 
-        private static void CleanUpCrashedSceneLoad()
+        private static void CleanUpSceneLoadCrash()
         {
             _sceneLoadOperationsInProgress = 0;
-            return;
         }
 
-        private static bool PlentyOfMemory()
+        private static bool MemoryUsageIsHigh()
         {
             MemoryInfo.MEMORYSTATUSEX mem;
             if (!OptimizeMemoryUsage.Value || (mem = MemoryInfo.GetCurrentStatus()) is null)
             {
-                return false;
-            }
-            if (!IsCommitChargeUsageSafe(mem))
-            {
-                return false;
+                return true;
             }
 
-            // Clean up more aggresively during loading, less aggresively during gameplay
-            bool memIsPlenty = mem.dwMemoryLoad 
-                    < (IsLoading() ? PercentMemoryThresholdDuringLoad.Value : PercentMemoryThreshold.Value);
+            var result = CommitChargeIsHigh(mem);
 
-            if (!memIsPlenty)
+            if (result)
             {
                 // in case a previous scene load crashed leaving count incorrect, clean it up
-                CleanUpCrashedSceneLoad();
-                return false;
+                CleanUpSceneLoadCrash();
+            }
+            else
+            {
+                Utilities.Logger.LogDebug("Skipping cleanup because of low memory load.");
             }
 
-            Utilities.Logger.LogDebug($"Skipping cleanup because of low memory load: ({mem.dwMemoryLoad}% RAM.)");
-            return true;
+            return result;
         }
 
         private static bool GetIsNowLoadingFade()
